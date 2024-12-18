@@ -10,9 +10,14 @@
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
 #define MSG_SIZE 9 /* fila para armazenar até 10 mensagens (alinhada ao limite de 4 bytes) */
 
+//#define GPIO_OUTPUT_ACTIVE (GPIO_OUTPUT | GPIO_OUTPUT_INIT_HIGH | GPIO_OUTPUT_INIT_LOGICAL)
+#define 
+#define GPIO_INPUT_ACTIVE (GPIO_INPUT | GPIO_PULL_UP)
+
 const struct device* stx = DEVICE_DT_GET(DT_NODELABEL(gpiob));
 
 K_FIFO_DEFINE(envia_dados);
+K_FIFO_DEFINE(recebe_dados);
 int cont1 = 0, cont2 = 0;
 
 struct pacote_dados {
@@ -29,6 +34,7 @@ static struct pacote_dados pacote = {
         .etx = 0x03
     };
 struct pacote_dados* envio;
+struct pacote_dados* recebido;
 
 /* fila para armazenar até 10 mensagens (alinhada ao limite de 4 bytes) */
 K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 4);
@@ -79,9 +85,11 @@ void enviando_dados() {
             if ((id & 0x80) == 0x80) {
                 printk("1");
                 gpio_pin_set(stx, 0x03, 1);
+                k_msleep(400);
             } else {
                 printk("0");
                 gpio_pin_set(stx, 0x03, 0);
+                k_msleep(400);
             }
             id <<= 1;
         }
@@ -99,17 +107,68 @@ void enviando_dados() {
                 if ((msg & 0x80) == 0x80) {
                     printk("1");
                     gpio_pin_set(stx, 0x03, 1);
-                    
+                    k_msleep(400);
                 } else {
                     printk("0");
                     gpio_pin_set(stx, 0x03, 0);
-                    
+                    k_msleep(400);
                 }
                 msg <<= 1;
             }
             printk("\n");
         }
     }
+}
+
+
+void recebendo_dados(void){
+    gpio_pin_configure(stx, 0x12, GPIO_INPUT_ACTIVE);
+    int c, somador1 = 0, somador2 = 0, somador3 = 0;
+    char armazena4, armazena8;
+
+    for(int j = 0; j < 4; j++){ //armazena os 4 primeiros bits recebidos do tx
+        gpio_pin_get(stx, 0x12, &c);
+        armazena4 <<= 1;
+        if(c == 1){
+            armazena4 = armazena4 | 0x01;
+        }else{
+            armazena4 = armazena4 | 0x00;
+        }
+        k_msleeps(100);
+    }
+    armazena4 = armazena4 & 0x0F;
+
+    armazena8 <<= 1;
+    if ((armazena4 & 0x06) == 0x06){
+        armazena8 = armazena8 | 0x01;
+    }else if ((armazena4 | 0x09) == 0x09){
+        armazena8 = armazena8 | 0x00;
+    }
+
+    if (armazena8 == 0x16 && somador1 == 0){ // verifica se é o sync, se for inicializa o somador
+        armazena8 = 0x00;
+        somador1++;
+        recebido->sync = 0x16;
+    }else if (armazena8 == 0x02 && somador1 == 1){ // verifica se é o stx, se for é um pacote valido
+        armazena8 = 0x00;
+        somador1++;
+        recebido->stx = 0x02;
+    }
+    if (somador1 == 2){ // se o pacote for valido inicializa o somador2
+        somador2++;
+    }
+    if (somador2 == 8){ // depois de receber os 8 bits, armazena o id
+        recebido->id_tamanho = armazena8;
+    }else if (somador2 > 15 && armazena4 != 0x03){ // armazena a mensagem ate que ache o etx
+        recebido->mensagem[somador3] = armazena8;
+        somador3++;
+    }else if(armazena4 == 0x03){ // se achar o etx, reinicia os somadores
+        somador1 = 0;
+        somador2 = 0;
+        somador3 = 0;
+        recebido->etx = 0x03;
+    }
+    k_fifo_put(&recebe_dados, &recebido);
 }
 
 void armazenar(char *buf) {
@@ -183,7 +242,6 @@ void pega_dados(void) {
 	
     }
 }
-
 
 
 /* Primeira thread le o que voce digita no teclado ate 7 bits (id) monta o pacote e trasnmite para a FIFO */
