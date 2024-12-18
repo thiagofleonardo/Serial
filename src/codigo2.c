@@ -169,13 +169,14 @@ void lendo_dados(void) {
         
         armazena4 = armazena4 & 0x0F;
 
-        armazena8 <<= 1;
-        if ((armazena4 & 0x0F) == 0x0F){
+        if ((armazena4 & 0x06) == 0x06){
+            armazena8 <<= 1;
             armazena8 = armazena8 | 0x1;
 			armazena4 = armazena4 & 0x0;
             printk("1");
 			xxx++;
-        }else if ((armazena4 | 0x0) == 0x0){
+        }else if ((armazena4 | 0x9) == 0x9){
+            armazena8 <<= 1;
             armazena8 = armazena8 | 0x0;
 			armazena4 = armazena4 | 0xF;
             printk("0");
