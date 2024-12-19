@@ -1,13 +1,13 @@
 /*
-O codigo abaixo tenta fazer o TX com duas threads, um para leitura do teclado e put na fifo e outra para get na
-e transmissao no pino. O codigo esta com erro, pois a thread de transmissao nao consegue pegar o pacote da fifo.
-Deixei 2 prints antes de colocar na fifo, para mostrar que o pacote esta sendo montado corretamente e outro depois
-de pegar o pacote da fifo, para mostrar que o pacote nao esta com dados.
+O codigo abaixo usa o TX com 2 threads, um para leitura do teclado e put na fifo e outra para get na fifo
+e transmissao no pino. O codigo esa funcioando perfeitamente, com uma terceira thread para leitura do pino. 
+A frequencia esta igual, mas pode ser alterada mudando o tempo de leitura no define.
 
-Nao consegui identificar o erro, mas terá consequencianas no codigo final. O CSMA com certeza será afetado, pois
-não será possivel travar a thread de transmissao para esperar o canal estar livre.
+Ter um codigo dessa maneira (com 2 threads) é essencial para a aplicaçao do CSMA, pois agora é possivel travar
+facilmente a thread de escrita no pino, evitando a sobreposiçao de pacotes.
+
+MANDAR 19/12
 */
-
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -17,13 +17,16 @@ não será possivel travar a thread de transmissao para esperar o canal estar li
 #define MY_STACK_SIZE 1024
 #define MY_PRIORITY 7 //prioridade da thread
 
+#define Leitura 40
+#define Escrita 40
+
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
 #define MSG_SIZE 9 /* fila para armazenar até 10 mensagens (alinhada ao limite de 4 bytes) */
 
 const struct device* stx = DEVICE_DT_GET(DT_NODELABEL(gpiob));
 
 K_FIFO_DEFINE(envia_dados);
-K_FIFO_DEFINE(recebe_dados);
+
 int cont1 = 0, cont2 = 0;
 uint8_t SYNC = 0x16, STX = 0x02, ETX = 0x03;
 
@@ -32,10 +35,6 @@ struct pacote_dados {
     void *fifo_reserved;  // Primeiro membro necessário para usar k_fifo
     uint8_t id_tamanho;
     char mensagem[8];
-};
-struct recebido {
-    void *fifo_reserved;
-    uint32_t armazena32;
 };
 
 /* fila para armazenar até 10 mensagens (alinhada ao limite de 4 bytes) */
@@ -84,7 +83,7 @@ void leitura(void){
     while(1){
         value = gpio_pin_get(stx, 0x1);
         printk("%d", value);
-        k_msleep(40);
+        k_msleep(Leitura);
     }
 }
 
@@ -95,12 +94,11 @@ void bits(uint8_t byte) {
         } else {
             gpio_pin_set(stx, 0x0, 0);
         }
-        k_msleep(40);
+        k_msleep(Escrita);
         byte <<= 1;
     }
 }
 
-int mutex = 0;
 struct pacote_dados pacote;
 void armazenar(char *buf) {
     int msg_len = strlen(buf);
@@ -109,18 +107,15 @@ void armazenar(char *buf) {
         printk("Peguei o ID\n");
         uint8_t result = 0;
         for (int i = 0; i < msg_len; i++) {
-            // Desloca o resultado à esquerda para dar espaço ao próximo bit
-            result <<= 1;
+            result <<= 1; // Desloca o resultado à esquerda para dar espaço ao próximo bit
             if (buf[i] == '1') {
-                // Adiciona 1 no bit menos significativo
-                result |= 1;
+                result |= 1; // Adiciona 1 no bit menos significativo
             }
         }
         pacote.id_tamanho = result;
         cont1++;
 
     } else if (msg_len < 8 && cont1 == 1) { //senao for o id é a mensagem
-        //printk("msg.tamanho: %d - ", msg_len);
         for (int i = 0; i < msg_len; i++) {
             pacote.mensagem[i] = buf[i]; //armazena a mensagem
         }
@@ -132,16 +127,9 @@ void armazenar(char *buf) {
     }
 
     if (cont1 == 1 && cont2 == 1) {
-        mutex = 1;
-        printk("ID:%d\n", pacote.id_tamanho);
-        printk("MSG:%d\n", pacote.mensagem[0]);
         k_fifo_put(&envia_dados, &pacote); //adicona o pacote na fila
-
-        pacote.id_tamanho = 0;
-        memset(pacote.mensagem, 0, sizeof(pacote.mensagem));
         cont1 = 0;
         cont2 = 0;
-        mutex = 2;
     } else if (cont1 > 1) {
         cont1 = 0;
         cont2 = 0;
@@ -156,11 +144,10 @@ void enviando_dados() {
     while (1) {
         struct pacote_dados* envio = k_fifo_get(&envia_dados, K_FOREVER);
         if(!envio) continue;
-        printk("ID:%d\n", envio->id_tamanho);
+
         bits(SYNC);
         bits(STX);
         bits(envio->id_tamanho);
-        printk("gay\n");
         for (int n = 0; n < sizeof(envio->mensagem); n++) {
             int msg = envio->mensagem[n];
             if (msg == '\0') {
