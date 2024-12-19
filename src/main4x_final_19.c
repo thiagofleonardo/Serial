@@ -1,3 +1,19 @@
+/*
+A primeira thread le o que o usuario digitar no teclado e armazena isso em uma fifo, que já é lida pela funcao 
+enviando_dados e escrita no pino PTB0. OBS: se o usuario decidir digitar uma segunda mensagem enquanto a outra
+estiver sendo transmitida, esta sera colocada na fila e depois transmitida. 
+
+Outra thread ficará lendo para sempre o pino PTB1. Quando ela achar o sync (0x16) ela entra em um conjunto de 
+açoes para ler o resto do pacote. Quando ela achar o etx (0x03) ela reinicia o processo.
+
+Rode o codigo, digite o id (se for valido vai printar: "Achei o ID") depois digite a mensagem de no maximo 7
+caracteres, se tudo ocorrer normalmente vai achar o sync, pular uma linha, printar o stx, pular uma linha, 
+printar o id, pular uma linha... ate printar o etx. Depois disso, o processo reinicia a busca pelo sync.
+
+Uma observação é que se o pino PTB1 estiver logicalmente alto quando o programa comecar a rodar, ele nao vai
+identificar o pacote e vai passar batido.
+*/
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -9,9 +25,6 @@
 
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
 #define MSG_SIZE 9 /* fila para armazenar até 10 mensagens (alinhada ao limite de 4 bytes) */
-
-//#define GPIO_OUTPUT_ACTIVE (GPIO_OUTPUT | GPIO_OUTPUT_INIT_HIGH | GPIO_OUTPUT_INIT_LOGICAL)
-#define GPIO_INPUT_ACTIVE (GPIO_INPUT | GPIO_PULL_UP)
 
 const struct device* stx = DEVICE_DT_GET(DT_NODELABEL(gpiob));
 
@@ -27,6 +40,10 @@ struct pacote_dados {
     char mensagem[8];
     char etx;
 };
+struct recebido {
+    void *fifo_reserved;
+    uint32_t armazena32;
+};
 static struct pacote_dados pacote = {
         .sync = 0x16,
         .stx = 0x02,
@@ -34,6 +51,12 @@ static struct pacote_dados pacote = {
     };
 struct pacote_dados* envio;
 struct pacote_dados* recebido;
+struct recebido leitura_pino = {
+	.armazena32 = 0
+};
+struct recebido pacote_recebido = {
+	.armazena32 = 0
+};
 
 /* fila para armazenar até 10 mensagens (alinhada ao limite de 4 bytes) */
 K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 4);
@@ -81,13 +104,15 @@ void bits(uint8_t byte) {
         } else {
             gpio_pin_set(stx, 0x0, 0);
         }
-        k_msleep(400);
+        k_msleep(40);
         byte <<= 1;
     }
 }
+
 void enviando_dados() {
     gpio_pin_configure(stx, 0x0, GPIO_OUTPUT_ACTIVE);
-
+    gpio_pin_set(stx, 0x0, 1);
+    
     while ((envio = k_fifo_get(&envia_dados, K_NO_WAIT)) != NULL) {
         bits(envio->sync);
         bits(envio->stx);
@@ -104,97 +129,119 @@ void enviando_dados() {
     }
 }
 
+uint8_t bit32_para_bit8(uint32_t entrada){
+    uint8_t resultado = 0;
 
-/*void recebendo_dados(void){
+    for (int i = 0; i < 8; i++) {
+        // Isolando 4 bits, começando do bit mais baixo
+        uint8_t bloco = (entrada >> (i * 4)) & 0xF;
+
+        // Extraindo os dois bits centrais
+		uint8_t bit0 = bloco & 0x1;
+        uint8_t bit1 = (bloco >> 1) & 0x1;
+        uint8_t bit2 = (bloco >> 2) & 0x1;
+
+        // Verificando se os dois bits centrais são iguais
+        if (bit1 != bit2) {
+            bit1 = bit0;  // Retorna -1 se houver um erro
+        }
+
+        // Calculando o valor do bit para o resultado
+        resultado |= bit1 << i;
+    }
+
+    return resultado;
+}
+
+void lendo_freq_4x(void){
     gpio_pin_configure(stx, 0x1, GPIO_INPUT);
-    int value, somador1 = 0, somador2 = 0, somador3 = 0;
-    int armazena4, armazena8;
+    int value = 0;
+    uint32_t bits32 = 0;
+    struct recebido novo_pacote;
 
-    for(int j = 0; j < 4; j++){ //armazena os 4 primeiros bits recebidos do tx
+    while(1){
         value = gpio_pin_get(stx, 0x1);
-        armazena4 <<= 1;
-        if(value == 1){
-            armazena4 = armazena4 | 0x01;
-        }else{
-            armazena4 = armazena4 | 0x00;
-        }
+        //printk("%d", value);
+        bits32 <<= 1;
+        bits32 |= value;
+		
+        novo_pacote.armazena32 = bits32;
+        k_fifo_put(&recebe_dados, &novo_pacote);
+        k_msleep(10);
     }
-    armazena4 = armazena4 & 0x0F;
+}
 
-    armazena8 <<= 1;
-    if ((armazena4 & 0x06) == 0x06){
-        armazena8 = armazena8 | 0x01;
-    }else if ((armazena4 | 0x09) == 0x09){
-        armazena8 = armazena8 | 0x00;
-    }
+void processa_leitura(void){
+    int somadorl = 0, contador7 = 0;
+    uint32_t entrada = 0;
+    uint8_t resultado = 0, id_lido = 0, memoria = 0;
+    char mensagem[8];
 
-    if (armazena8 == 0x16 && somador1 == 0){ // verifica se é o sync, se for inicializa o somador
-        armazena8 = 0x00;
-        somador1++;
-        recebido->sync = 0x16;
-    }else if (armazena8 == 0x02 && somador1 == 1){ // verifica se é o stx, se for é um pacote valido
-        armazena8 = 0x00;
-        somador1++;
-        recebido->stx = 0x02;
-    }
-    if (somador1 == 2){ // se o pacote for valido inicializa o somador2
-        somador2++;
-    }
-    if (somador2 == 8){ // depois de receber os 8 bits, armazena o id
-        recebido->id_tamanho = armazena8;
-    }else if (somador2 > 15 && armazena4 != 0x03){ // armazena a mensagem ate que ache o etx
-        recebido->mensagem[somador3] = armazena8;
-        somador3++;
-    }else if(armazena4 == 0x03){ // se achar o etx, reinicia os somadores
-        somador1 = 0;
-        somador2 = 0;
-        somador3 = 0;
-        recebido->etx = 0x03;
-    }
-    k_fifo_put(&recebe_dados, &recebido);
-}*/
+    while(1){
+        struct recebido* processamento_analise = k_fifo_get(&recebe_dados, K_FOREVER);
+        if(!processamento_analise) continue;
 
-void lendo_dados(void) {
-    gpio_pin_configure(stx, 0x1, GPIO_INPUT);
-    int value = 0, xxx = 0, armazena4 = 0, armazena8 = 0;
-
-    while (1){     
-		value = gpio_pin_get(stx, 0x1);
-		armazena4 <<= 1;
-		if(value == 1){
-			armazena4 = armazena4 | 0x1;
-		}else{
-			armazena4 = armazena4 | 0x0;
-		}
+        entrada = processamento_analise->armazena32;
+        resultado = bit32_para_bit8(entrada);
         
-        armazena4 = armazena4 & 0x0F;
-
-        if ((armazena4 & 0x06) == 0x06){
-            armazena8 <<= 1;
-            armazena8 = armazena8 | 0x1;
-			armazena4 = armazena4 & 0x0;
-            printk("1");
-			xxx++;
-        }else if ((armazena4 | 0x9) == 0x9){
-            armazena8 <<= 1;
-            armazena8 = armazena8 | 0x0;
-			armazena4 = armazena4 | 0xF;
-            printk("0");
-			xxx++;
-        }
-        if(xxx == 8){
+        /*if(somadorl > 2){
+		    printk("-%d", resultado);
+        }*/
+        if(resultado == 0x03 && somadorl > 2){
+            printk("\nAchei o etx\n");
+            somadorl = 0;
+            printk("ID: %d\n", id_lido);
+            printk("Mensagem: ");
+            for(int i = 0; i < (id_lido & 0x07); i++){
+                printk("%c-", mensagem[i]);
+                mensagem[i] = NULL;
+            }
             printk("\n");
-            xxx = 0;
         }
-		k_msleep(100);
+
+        //contabits++;
+
+        if (resultado == 0x16 && somadorl == 0) {
+            printk("\nAchei o sync\n");
+            somadorl++;
+            //contabits = 0;
+        } else if (resultado == 0x02 && somadorl == 1) {
+            printk("Achei o stx\n");
+            somadorl++;
+            contador7 = 0;
+        } else if (somadorl == 2 && contador7 == 31) {
+            printk("Achei o ID: %d\n", resultado);
+            contador7 = 0;
+            somadorl++;
+            id_lido = resultado;
+        } else if(somadorl >= 2){
+            contador7++;
+        }
+        if (somadorl > 2 && contador7 == 32 && (somadorl < (3+(id_lido & 0x7)))){
+            contador7 = 0;
+            if(memoria == (resultado-1) || memoria == (resultado+1) || resultado < 33 || resultado > 125){
+                mensagem[somadorl - 3] = memoria;
+                printk("Mensagem[%d]: %d", (somadorl-3), memoria);
+            }else{
+                mensagem[somadorl - 3] = resultado;
+                printk("Mensagem[%d]: %d", (somadorl-3), resultado);
+            }
+            somadorl++;
+            printk("\n");
+        }
+
+        /*if (contabits > 31) {
+            somadorl = 0;
+        }*/
+       memoria = resultado;
     }
 }
 
 void armazenar(char *buf) {
     int msg_len = strlen(buf);
 
-    if (msg_len == 8) { // verifica se é o id
-        printk("Achei o ID\n");
+    if (msg_len == 8 && cont1 == 0) { // verifica se é o id
+        printk("Peguei o ID\n");
         uint8_t result = 0;
         for (int i = 0; i < msg_len; i++) {
             // Desloca o resultado à esquerda para dar espaço ao próximo bit
@@ -207,12 +254,16 @@ void armazenar(char *buf) {
         pacote.id_tamanho = result;
         cont1++;
 
-    } else { //senao for o id é a mensagem
+    } else if (msg_len < 8 && cont1 == 1) { //senao for o id é a mensagem
         //printk("msg.tamanho: %d - ", msg_len);
         for (int i = 0; i < msg_len; i++) {
             pacote.mensagem[i] = buf[i]; //armazena a mensagem
         }
         cont2++;
+    } else if (msg_len >= 8 && cont1 > 0){
+        cont1++;
+    } else if (msg_len < 8){
+        printk("Digite um ID valido!\n");
     }
 
     if (cont1 == 1 && cont2 == 1) {
@@ -225,10 +276,11 @@ void armazenar(char *buf) {
         memset(pacote.mensagem, 0, sizeof(pacote.mensagem));
         cont1 = 0;
         cont2 = 0;
-    } else if (cont1 > 1 || cont2 > 1) {
+    } else if (cont1 > 1) {
         cont1 = 0;
         cont2 = 0;
-		printk("2 id's\n");
+		printk("Mensagem invalida\n");
+        printk("Digite novamente o ID!\n");
     }
 }
 
@@ -258,11 +310,11 @@ void pega_dados(void) {
     /* espera indefinidamente por entrada do usuário */
     while (k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0) {
 		armazenar(tx_buf);
-	
     }
 }
 
 
 /* Primeira thread le o que voce digita no teclado ate 7 bits (id) monta o pacote e trasnmite para a FIFO */
 K_THREAD_DEFINE(pega_dados_id, MY_STACK_SIZE, pega_dados, NULL, NULL, NULL, MY_PRIORITY, 0, 0);
-K_THREAD_DEFINE(lendo_dados_id, MY_STACK_SIZE, lendo_dados, NULL, NULL, NULL, MY_PRIORITY, 0, 0);
+K_THREAD_DEFINE(lendo_freq_4x_id, MY_STACK_SIZE, lendo_freq_4x, NULL, NULL, NULL, MY_PRIORITY, 0, 0);
+K_THREAD_DEFINE(processa_leitura_id, MY_STACK_SIZE, processa_leitura, NULL, NULL, NULL, MY_PRIORITY, 0, 0);
