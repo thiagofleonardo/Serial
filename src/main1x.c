@@ -1,7 +1,7 @@
 /*
 A primeira thread le o que o usuario digitar no teclado e armazena isso em uma fifo, que já é lida pela funcao 
 enviando_dados e escrita no pino PTB0. OBS: se o usuario decidir digitar uma segunda mensagem enquanto a outra
-estiver sendo transmitida, esta sera colocada na fila e depois transmitida. 
+estiver sendo transmitida, esta sera colocada na fila e depois transmitida.
 
 Outra thread ficará lendo para sempre o pino PTB1. Quando ela achar o sync (0x16) ela entra em um conjunto de 
 açoes para ler o resto do pacote. Quando ela achar o etx (0x03) ela reinicia o processo.
